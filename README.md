@@ -41,6 +41,7 @@ ParakeetEye is a real-time facial recognition system built in Python, featuring 
 ---
 ##  Installation & Usage
 
+```bash
 ### 1. Clone the repository
 
 git clone https://github.com/CavalodeCombate123/ParakeetEye.git
@@ -54,11 +55,13 @@ python scripts/BootData.py
 
 ### 4. Run the application
 python scripts/main.py
+```
 
 ---
 
-### Project Structure
+## Project Structure
 
+```bash
 ParakeetEye/
 ├── .gitignore
 ├── README.md
@@ -78,13 +81,14 @@ ParakeetEye/
 │   └── ParakeetEye.docx
 │
 └── scripts/
-├── main.py
-├── operations.py
-├── face_processing.py
-├── database.py
-├── image_utils.py
-├── constants.py
-└── BootData.py
+    ├── main.py
+    ├── operations.py
+    ├── face_processing.py
+    ├── database.py
+    ├── image_utils.py
+    ├── constants.py
+    └── BootData.py
+```
 
 ---
 
