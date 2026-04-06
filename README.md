@@ -47,43 +47,44 @@ git clone https://github.com/CavalodeCombate123/ParakeetEye.git
 cd ParakeetEye 
 
 ### 2. Install dependencies
-Bashpip install -r requirements.txt
+pip install -r requirements.txt
 
 ### 3. (Optional) Initialize database from dataset/ folder
-Bashpython scripts/BootData.py
+python scripts/BootData.py
 
 ### 4. Run the application
-Bashpython scripts/main.py
+python scripts/main.py
 
 ---
 
-Project Structure
+### Project Structure
+
 ParakeetEye/
 ├── .gitignore
 ├── README.md
 ├── requirements.txt
 │
-├── assets/                  # Images and visual resources
+├── assets/
 │   ├── Interface.jpg
 │   └── teste.gif
 │
-├── data/                    # Generated database
+├── data/
 │   ├── encodings.npy
 │   └── nomes.npy
 │
-├── dataset/                 # (Optional) Source images for initial boot
+├── dataset/                 # (Optional)
 │
-├── docs/                    # Documentation
+├── docs/
 │   └── ParakeetEye.docx
 │
-└── scripts/                 # Modular source code
-    ├── main.py              # Main GUI
-    ├── operations.py        # Upload, webcam and registration logic
-    ├── face_processing.py   # Face detection, liveness and anti-spoofing
-    ├── database.py          # Database management
-    ├── image_utils.py       # Image utilities
-    ├── constants.py         # System constants
-    └── BootData.py          # Initial database builder
+└── scripts/
+├── main.py
+├── operations.py
+├── face_processing.py
+├── database.py
+├── image_utils.py
+├── constants.py
+└── BootData.py
 
 ---
 
