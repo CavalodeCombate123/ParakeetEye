@@ -92,7 +92,7 @@ ParakeetEye/
 
 ---
 
-### How It Works
+## How It Works
 
 The system uses the face_recognition library to extract 128-dimensional facial encodings.
 During operation:
@@ -102,13 +102,13 @@ Encodings are compared using Euclidean distance
 Liveness detection (Laplacian variance + movement analysis) prevents spoofing attacks
 All data is stored locally in .npy files for fast access
 
-### Important Notes
+## Important Notes
 
 Recognition accuracy depends on lighting conditions and image quality
 Recognition threshold: 0.6
 The project was fully modularized for better maintainability and future scalability
 
-### Future Improvements
+## Future Improvements
 
 Attendance system with date/time logging
 Enhanced graphical interface (PyQt or custom Tkinter)
@@ -116,5 +116,5 @@ Support for multiple profiles per person
 SQLite database integration
 Cloud synchronization
 
-##Developed with for learning and practical application of Computer Vision.
-##Feel free to contribute, suggest improvements, or reach out!
+## Developed with for learning and practical application of Computer Vision.
+## Feel free to contribute, suggest improvements, or reach out!
