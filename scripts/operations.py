@@ -2,13 +2,11 @@ import cv2
 import numpy as np
 import tkinter as tk
 from tkinter import filedialog, messagebox
-import face_recognition
 from tkinter.simpledialog import askstring
-import os
 
 from constants import *
 from face_processing import *
-from database import carregar_banco
+from database import carregar_banco, carregar_dataframe, adicionar_pessoa, listar_nomes, deletar_pessoa
 from image_utils import mostrar_imagem_redimensionada
 
 # -------------------------------
@@ -21,30 +19,53 @@ def upload_imagem():
         return
 
     try:
-        imagem = face_recognition.load_image_file(caminho)
-        imagem_bgr = cv2.cvtColor(imagem, cv2.COLOR_RGB2BGR)
+        imagem_bgr = cv2.imread(caminho)
+        if imagem_bgr is None:
+            messagebox.showerror("Erro", "Não foi possível abrir a imagem.")
+            return
+        imagem = cv2.cvtColor(imagem_bgr, cv2.COLOR_BGR2RGB)
 
-        localizacoes = face_recognition.face_locations(imagem)
-        encodings_imagem = face_recognition.face_encodings(imagem, localizacoes)
+        faces_detectadas = detectar_faces(
+            imagem_bgr,
+            anti_spoofing=False,
+            detector_backend=DEEPFACE_DETECTOR_PESADO,
+        )
+        localizacoes = [face["loc"] for face in faces_detectadas]
+        encodings_imagem = [gerar_embedding(imagem_bgr, loc) for loc in localizacoes]
 
         resultados = []
 
-        for (top, right, bottom, left), encoding in zip(localizacoes, encodings_imagem):
-            ok_prof, _ = verificar_profundidade_face(imagem, (top, right, bottom, left))
+        anti_spoof_faces = detectar_faces(
+            imagem_bgr,
+            anti_spoofing=True,
+            detector_backend=DEEPFACE_DETECTOR_PESADO,
+        )
+
+        for idx, ((top, right, bottom, left), encoding) in enumerate(zip(localizacoes, encodings_imagem)):
+            anti_spoofing_info = anti_spoof_faces[idx] if idx < len(anti_spoof_faces) else None
+            ok_prof, _ = verificar_profundidade_face(
+                imagem,
+                (top, right, bottom, left),
+                imagem_bgr=imagem_bgr,
+                anti_spoofing_info=anti_spoofing_info,
+            )
             cor = (0, 255, 0)
             
-            if not ok_prof:
+            if encoding is None:
+                nome = "Face inválida para embedding"
+                cor = (0, 0, 255)
+            elif not ok_prof:
                 nome = "Possível foto/plano (não comparado ao banco)"
                 cor = (0, 165, 255)
             elif len(encodings_conhecidos) == 0:
                 nome = "Desconhecido"
             else:
-                distancias = face_recognition.face_distance(encodings_conhecidos, encoding)
+                distancias = distancia_embeddings(encodings_conhecidos, encoding)
                 if len(distancias) == 0:
                     nome = "Desconhecido"
                 else:
                     melhor_match = np.argmin(distancias)
-                    nome = nomes_conhecidos[melhor_match] if distancias[melhor_match] < 0.6 else "Desconhecido"
+                    nome = nomes_conhecidos[melhor_match] if distancias[melhor_match] < LIMIAR_RECONHECIMENTO else "Desconhecido"
 
             resultados.append(nome)
 
@@ -73,64 +94,108 @@ def abrir_webcam():
             messagebox.showerror("Erro", "Não foi possível acessar a webcam.")
             return
 
-        frame_count = 0
         encodings_conhecidos, nomes_conhecidos = carregar_banco()
-        
-        # Lista para guardar detecções e não piscar a tela
-        localizacoes = []
-        nomes_detectados = []
-        gray_pequeno_anterior = None
+        tracks = {}
+        next_track_id = 1
+        frame_count = 0
+        gray_anterior = None
 
         while True:
-            ok, frame = camera.read()
-            if not ok: 
+            ret, frame = camera.read()
+            if not ret:
                 break
 
             frame_count += 1
-            
-            # Otimização 
-            if frame_count % 3 == 0:   # Melhoria: processa a cada 3 frames
-                frame_pequeno = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
-                rgb = cv2.cvtColor(frame_pequeno, cv2.COLOR_BGR2RGB)
-                gray_pequeno = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-                
-                localizacoes = face_recognition.face_locations(rgb, model="hog")
-                encodings_frame = face_recognition.face_encodings(rgb, localizacoes)
-                
-                nomes_detectados = []
-                for loc, encoding in zip(localizacoes, encodings_frame):
-                    top, right, bottom, left = loc
-                    exigir_mov = gray_pequeno_anterior is not None
+
+            # Redimensiona para performance
+            frame_small = cv2.resize(frame, (0, 0), fx=WEBCAM_SCALE, fy=WEBCAM_SCALE)
+            rgb_small = cv2.cvtColor(frame_small, cv2.COLOR_BGR2RGB)
+            gray_small = cv2.cvtColor(rgb_small, cv2.COLOR_RGB2GRAY)
+
+            # === Detecção de faces (leve e esparsa) ===
+            if frame_count % WEBCAM_DETECT_EVERY == 0:
+                detected = detectar_faces(
+                    frame_small,
+                    anti_spoofing=False,
+                    detector_backend=DEEPFACE_DETECTOR_TEMPO_REAL,
+                )
+                locs = [f["loc"] for f in detected]
+                matched, _ = associar_tracks_robusto(tracks, locs)
+
+                new_tracks = {}
+                for i, loc in enumerate(locs):
+                    track_id = matched.get(i)
+                    if track_id is None:
+                        track_id = next_track_id
+                        next_track_id += 1
+                    new_tracks[track_id] = tracks.get(track_id, {
+                        "loc": loc,
+                        "nome": "Desconhecido",
+                        "embedding": None,
+                        "spoof_ok": True,
+                        "last_embed": 0,
+                        "last_spoof": 0
+                    })
+                    new_tracks[track_id]["loc"] = loc
+                tracks = new_tracks
+
+            # === Atualização de reconhecimento e anti-spoofing ===
+            for track_id, data in list(tracks.items()):
+                loc = data["loc"]
+
+                # Anti-spoofing antes do reconhecimento: se falhar, não compara ao banco (evita nome + alerta laranja)
+                if frame_count - data["last_spoof"] >= WEBCAM_ANTISPOOF_EVERY:
                     ok_prof, _ = verificar_profundidade_face(
-                        rgb, loc, gray_anterior=gray_pequeno_anterior, exigir_movimento=exigir_mov
+                        rgb_small, loc, gray_anterior=gray_anterior,
+                        exigir_movimento=True, imagem_bgr=frame_small
                     )
-                    if not ok_prof:
-                        nomes_detectados.append("Possível foto/plano")
-                        continue
-                        
-                    if len(encodings_conhecidos) > 0:
-                        distancias = face_recognition.face_distance(encodings_conhecidos, encoding)
-                        melhor_match = np.argmin(distancias)
-                        nome = nomes_conhecidos[melhor_match] if distancias[melhor_match] < 0.6 else "Desconhecido"
-                    else:
-                        nome = "Desconhecido"
-                    nomes_detectados.append(nome)
+                    data["spoof_ok"] = ok_prof
+                    data["last_spoof"] = frame_count
 
-                gray_pequeno_anterior = gray_pequeno.copy()
+                # Embedding (reconhecimento) só se passou em vivacidade/anti-spoof recente
+                if (
+                    encodings_conhecidos
+                    and data.get("spoof_ok", True)
+                    and (frame_count - data["last_embed"] >= WEBCAM_EMBED_EVERY)
+                ):
+                    emb = gerar_embedding(frame_small, loc)
+                    if emb is not None:
+                        data["embedding"] = emb
+                        dists = distancia_embeddings(encodings_conhecidos, emb)
+                        if len(dists) > 0:
+                            best = np.argmin(dists)
+                            data["nome"] = (
+                                nomes_conhecidos[best]
+                                if dists[best] < LIMIAR_RECONHECIMENTO_WEBCAM
+                                else "Desconhecido"
+                            )
+                        data["last_embed"] = frame_count
+                elif not data.get("spoof_ok", True):
+                    # Mantém nome genérico enquanto suspeita de foto/plano
+                    data["nome"] = "Possível foto/plano"
 
-            # Desenhar
-            for (top, right, bottom, left), nome in zip(localizacoes, nomes_detectados):
-                top *= 4; right *= 4; bottom *= 4; left *= 4 
-                cor = (0, 165, 255) if "Possível foto" in nome else (0, 255, 0)
-                cv2.rectangle(frame, (left, top), (right, bottom), cor, 2)
-                cv2.putText(frame, nome, (left, top-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, cor, 2)
+            gray_anterior = gray_small.copy()
 
-            cv2.imshow("Webcam", frame)
-            if cv2.waitKey(1) == 27: 
+            # === Desenho final ===
+            for data in tracks.values():
+                t, r, b, l = data["loc"]
+                scale = 1 / WEBCAM_SCALE
+                x1, y1, x2, y2 = int(l*scale), int(t*scale), int(r*scale), int(b*scale)
+
+                nome = data.get("nome", "Desconhecido")
+                cor = (0, 165, 255) if not data.get("spoof_ok", True) else (0, 255, 0)
+
+                cv2.rectangle(frame, (x1, y1), (x2, y2), cor, 2)
+                cv2.putText(frame, nome, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.65, cor, 2)
+
+            cv2.imshow("ParakeetEye - Webcam", frame)
+
+            if cv2.waitKey(1) & 0xFF == 27:  # ESC
                 break
 
         camera.release()
         cv2.destroyAllWindows()
+
     except Exception as e:
         messagebox.showerror("Erro", f"Erro na webcam:\n{e}")
 
@@ -155,42 +220,88 @@ def cadastrar_pessoa():
     gray_anterior = None
     liberado_captura = False
     aviso_multiplo = ""
+    frame_count = 0
+    anti_spoof_cache_ok = None
+    anti_spoof_cache_msg = "Aguardando anti-spoofing..."
+    anti_spoof_countdown = 0
+    loc_rosto_cache = None
 
-    while contador < 20:
+    while contador < 30:
         ok, frame = camera.read()
         if not ok:
             break
+        frame_count += 1
 
+        frame = cv2.resize(frame, (0, 0), fx=WEBCAM_SCALE, fy=WEBCAM_SCALE)
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        faces = face_recognition.face_locations(rgb)
+        if frame_count % CADASTRO_DETECT_EVERY == 0:
+            faces_detectadas = detectar_faces(
+                frame,
+                anti_spoofing=False,
+                detector_backend=DEEPFACE_DETECTOR_TEMPO_REAL,
+            )
+            faces = [face["loc"] for face in faces_detectadas]
+            if len(faces) == 1:
+                loc_rosto_cache = faces[0]
+            else:
+                loc_rosto_cache = None
+        else:
+            faces = [loc_rosto_cache] if loc_rosto_cache is not None else []
         ok_unico, msg_unico = validar_unico_rosto_para_cadastro(faces)
         aviso_multiplo = "" if ok_unico else msg_unico
 
         # Verificação de profundidade / vivacidade  
         if ok_unico:
             loc = faces[0]
-            ok_prof, msg_prof = verificar_profundidade_face(
-                rgb, loc, gray_anterior=gray_anterior, exigir_movimento=False
-            )
+            # Anti-spoofing pesado em frequência reduzida para evitar travamento.
+            if USAR_ANTISPOOF_CADASTRO and anti_spoof_countdown <= 0:
+                anti_spoof_faces = detectar_faces(
+                    frame,
+                    anti_spoofing=True,
+                    detector_backend=DEEPFACE_DETECTOR_PESADO,
+                )
+                anti_spoofing_info = anti_spoof_faces[0] if anti_spoof_faces else None
+                anti_spoof_cache_ok, anti_spoof_cache_msg = verificar_profundidade_face(
+                    rgb,
+                    loc,
+                    gray_anterior=gray_anterior,
+                    exigir_movimento=False,
+                    imagem_bgr=frame,
+                    anti_spoofing_info=anti_spoofing_info,
+                )
+                anti_spoof_countdown = 12
+            else:
+                anti_spoof_countdown -= 1
+
+            if USAR_ANTISPOOF_CADASTRO:
+                ok_prof = bool(anti_spoof_cache_ok)
+                msg_prof = anti_spoof_cache_msg
+            else:
+                ok_prof = True
+                msg_prof = ""
+
             cinza = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
             mov = movimento_medio_roi(cinza, gray_anterior, *loc) if gray_anterior is not None else None
             if mov is not None and mov >= LIMIAR_MOVIMENTO_ROI:
                 liberado_captura = True
             gray_anterior = cinza.copy()
 
-            encodings = face_recognition.face_encodings(rgb, [loc]) if ok_prof else []
+            # Embedding ArcFace: menos frequente para manter FPS no cadastro
+            deve_gerar_embedding = frame_count % 3 == 0
+            encoding = gerar_embedding(frame, loc) if (ok_prof and deve_gerar_embedding) else None
 
-            if ok_prof and liberado_captura and encodings:
-                encoding = encodings[0]
-                if len(novos_encodings) == 0 or np.mean(face_recognition.face_distance([novos_encodings[-1]], encoding)) > 0.35:
+            if ok_prof and liberado_captura and encoding is not None:
+                if len(novos_encodings) == 0 or np.mean(distancia_embeddings([novos_encodings[-1]], encoding)) > LIMIAR_DIVERSIDADE_CADASTRO:
                     novos_encodings.append(encoding)
                     contador += 1
             elif not ok_prof:
                 aviso_multiplo = msg_prof
         else:
             gray_anterior = None
+            anti_spoof_countdown = 0
+            loc_rosto_cache = None
 
-        cv2.putText(frame, f"{contador}/20", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        cv2.putText(frame, f"{contador}/30", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
         
         if aviso_multiplo:
             cv2.putText(frame, aviso_multiplo[:70], (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
@@ -217,17 +328,8 @@ def cadastrar_pessoa():
         messagebox.showerror("Erro", "Poucas amostras válidas capturadas. Tente novamente.")
         return
 
-    # carregar banco
-    encodings_existentes, nomes_existentes = carregar_banco()
-
-    # adicionar novos
-    encodings_existentes.extend(novos_encodings)
-    nomes_existentes.extend([nome] * len(novos_encodings))
-
-    # salvar
     try:
-        np.save("data/encodings.npy", encodings_existentes)
-        np.save("data/nomes.npy", nomes_existentes)
+        adicionar_pessoa(nome, novos_encodings)
         messagebox.showinfo("Sucesso", f"{nome} cadastrado com sucesso! ({len(novos_encodings)} amostras)")
     except Exception as e:
         messagebox.showerror("Erro", f"Erro ao salvar:\n{e}")
@@ -237,7 +339,7 @@ def cadastrar_pessoa():
 #-------------------------------
 def listar_pessoas(janela):  # parâmetro adicionado para modularidade
     try:
-        nomes = np.load("data/nomes.npy", allow_pickle=True).tolist()
+        nomes = listar_nomes()
     except:
         messagebox.showinfo("Banco", "Nenhuma pessoa cadastrada.")
         return
@@ -282,19 +384,7 @@ def listar_pessoas(janela):  # parâmetro adicionado para modularidade
             return
 
         try:
-            nomes_np = np.load("data/nomes.npy", allow_pickle=True).tolist()
-            encodings_np = np.load("data/encodings.npy", allow_pickle=True).tolist()
-
-            novos_nomes = []
-            novos_encodings = []
-
-            for n, e in zip(nomes_np, encodings_np):
-                if n != nome:
-                    novos_nomes.append(n)
-                    novos_encodings.append(e)
-
-            np.save("data/nomes.npy", novos_nomes)
-            np.save("data/encodings.npy", novos_encodings)
+            deletar_pessoa(nome)
 
             messagebox.showinfo("Sucesso", f"{nome} removido.")
             janela_lista.destroy()
@@ -309,3 +399,65 @@ def listar_pessoas(janela):  # parâmetro adicionado para modularidade
 
         tk.Label(linha, text=f"{nome} ({qtd})", anchor="w").pack(side="left", fill="x", expand=True)
         tk.Button(linha, text="❌", fg="red", command=lambda n=nome: deletar(n)).pack(side="right")
+
+#-------------------------------
+# Exportar banco para Excel/CSV
+#-------------------------------
+def exportar_banco_planilha():
+    try:
+        df = carregar_dataframe()
+    except Exception as e:
+        messagebox.showerror("Exportação", f"Erro ao carregar banco:\n{e}")
+        return
+
+    if df.empty:
+        messagebox.showinfo("Exportação", "Banco vazio. Não há dados para exportar.")
+        return
+
+    df_export = df.copy()
+    if "nome" not in df_export.columns:
+        messagebox.showerror("Exportação", "Formato do banco inválido (coluna 'nome' ausente).")
+        return
+
+    # Evita exportar vetor completo do embedding para planilha ficar legível.
+    if "embedding" in df_export.columns:
+        df_export["embedding_dim"] = df_export["embedding"].apply(
+            lambda x: len(x) if hasattr(x, "__len__") else 0
+        )
+        df_export = df_export.drop(columns=["embedding"])
+
+    caminho = filedialog.asksaveasfilename(
+        title="Salvar planilha do banco",
+        defaultextension=".xlsx",
+        filetypes=[
+            ("Excel", "*.xlsx"),
+            ("CSV", "*.csv"),
+        ],
+        initialfile="faces_db_resumo.xlsx",
+    )
+    if not caminho:
+        return
+
+    try:
+        if caminho.lower().endswith(".csv"):
+            df_export.to_csv(caminho, index=False, encoding="utf-8-sig")
+        else:
+            try:
+                df_export.to_excel(caminho, index=False)
+            except Exception:
+                # fallback para CSV quando não houver engine Excel (ex.: openpyxl ausente)
+                caminho_csv = caminho.rsplit(".", 1)[0] + ".csv"
+                df_export.to_csv(caminho_csv, index=False, encoding="utf-8-sig")
+                messagebox.showwarning(
+                    "Exportação",
+                    "Não foi possível gerar .xlsx neste ambiente. "
+                    f"Arquivo CSV gerado em:\n{caminho_csv}",
+                )
+                return
+
+        messagebox.showinfo(
+            "Exportação",
+            f"Planilha exportada com sucesso!\nRegistros: {len(df_export)}\nArquivo: {caminho}",
+        )
+    except Exception as e:
+        messagebox.showerror("Exportação", f"Falha ao exportar planilha:\n{e}")
