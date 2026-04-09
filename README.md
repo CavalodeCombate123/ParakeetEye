@@ -21,10 +21,10 @@ ParakeetEye is a real-time facial recognition system built in Python, featuring 
 ## Technologies
 
 - **Python**
-- **face_recognition** (dlib-based deep learning)
+- **face_processing** (DataFace)
 - **OpenCV**
 - **Tkinter** (GUI)
-- **NumPy**
+- **Pandas**
 
 ---
 
