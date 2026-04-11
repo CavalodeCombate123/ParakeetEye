@@ -6,7 +6,18 @@ from tkinter.simpledialog import askstring
 
 from constants import *
 from face_processing import *
-from database import carregar_banco, carregar_dataframe, adicionar_pessoa, listar_nomes, deletar_pessoa
+from database import (
+    banco_possui_registros,
+    carregar_banco,
+    carregar_dataframe,
+    adicionar_pessoa,
+    concatenar_banco_de_arquivo,
+    deletar_pessoa,
+    exportar_banco_zip,
+    extrair_dataframe_importacao,
+    listar_nomes,
+    substituir_banco_de_arquivo,
+)
 from image_utils import mostrar_imagem_redimensionada
 
 # -------------------------------
@@ -461,3 +472,154 @@ def exportar_banco_planilha():
         )
     except Exception as e:
         messagebox.showerror("Exportação", f"Falha ao exportar planilha:\n{e}")
+
+
+# -------------------------------
+# Exportar arquivos do banco (ZIP)
+# -------------------------------
+def exportar_banco_arquivos_zip():
+    try:
+        caminho = filedialog.asksaveasfilename(
+            title="Salvar backup do banco de dados",
+            defaultextension=".zip",
+            filetypes=[("Arquivo ZIP", "*.zip")],
+            initialfile="parakeeteye_banco.zip",
+        )
+        if not caminho:
+            return
+        exportar_banco_zip(caminho)
+        messagebox.showinfo(
+            "Exportação",
+            f"Arquivos do banco exportados com sucesso.\nArquivo:\n{caminho}",
+        )
+    except ValueError as e:
+        messagebox.showinfo("Exportação", str(e))
+    except Exception as e:
+        messagebox.showerror("Exportação", f"Falha ao exportar ZIP:\n{e}")
+
+
+# -------------------------------
+# Menu: Exportar banco de dados
+# -------------------------------
+def exportar_banco_menu(janela_pai):
+    topo = tk.Toplevel(janela_pai)
+    topo.title("Exportar banco de dados")
+    topo.geometry("360x150")
+    topo.transient(janela_pai)
+    topo.grab_set()
+
+    def planilha():
+        topo.destroy()
+        exportar_banco_planilha()
+
+    def zip_backup():
+        topo.destroy()
+        exportar_banco_arquivos_zip()
+
+    tk.Label(topo, text="Escolha o tipo de exportação:").pack(pady=(14, 10))
+    tk.Button(
+        topo,
+        text="Exportar planilha em Excel/CSV",
+        command=planilha,
+        width=32,
+    ).pack(pady=4)
+    tk.Button(
+        topo,
+        text="Exportar arquivos do banco (ZIP)",
+        command=zip_backup,
+        width=32,
+    ).pack(pady=4)
+
+
+# -------------------------------
+# Importar banco de dados
+# -------------------------------
+def _pergunta_substituir_concatenar(janela_pai):
+    escolha = [None]
+
+    def definir(valor):
+        escolha[0] = valor
+        topo.destroy()
+
+    topo = tk.Toplevel(janela_pai)
+    topo.title("Importar banco de dados")
+    topo.geometry("440x170")
+    topo.transient(janela_pai)
+    topo.grab_set()
+
+    tk.Label(
+        topo,
+        text=(
+            "Já existe um banco com dados em execução.\n"
+            "Deseja substituir ou concatenar com o banco importado?"
+        ),
+        justify="center",
+    ).pack(pady=(18, 14))
+
+    bf = tk.Frame(topo)
+    bf.pack()
+    tk.Button(bf, text="Cancelar", width=12, command=lambda: definir("cancelar")).pack(
+        side="left", padx=6
+    )
+    tk.Button(bf, text="Substituir", width=12, command=lambda: definir("substituir")).pack(
+        side="left", padx=6
+    )
+    tk.Button(bf, text="Concatenar", width=12, command=lambda: definir("concatenar")).pack(
+        side="left", padx=6
+    )
+
+    janela_pai.wait_window(topo)
+    return escolha[0]
+
+
+def importar_banco_interativo(janela_pai):
+    caminho = filedialog.askopenfilename(
+        title="Selecionar banco de dados",
+        filetypes=[
+            ("Banco ParakeetEye", "*.zip *.pkl"),
+            ("ZIP", "*.zip"),
+            ("Pickle", "*.pkl"),
+            ("Todos os arquivos", "*.*"),
+        ],
+    )
+    if not caminho:
+        return
+
+    try:
+        df_prev = extrair_dataframe_importacao(caminho)
+    except Exception as e:
+        messagebox.showerror("Importação", f"Não foi possível ler o arquivo:\n{e}")
+        return
+
+    if df_prev.empty:
+        messagebox.showinfo(
+            "Importação",
+            "O arquivo selecionado não contém registros para importar.",
+        )
+        return
+
+    try:
+        if banco_possui_registros():
+            modo = _pergunta_substituir_concatenar(janela_pai)
+            if modo is None or modo == "cancelar":
+                return
+            if modo == "substituir":
+                substituir_banco_de_arquivo(caminho)
+                messagebox.showinfo(
+                    "Importação",
+                    "Banco de dados substituído com sucesso.",
+                )
+            else:
+                concatenar_banco_de_arquivo(caminho)
+                messagebox.showinfo(
+                    "Importação",
+                    "Dados concatenados ao banco atual com sucesso.",
+                )
+        else:
+            substituir_banco_de_arquivo(caminho)
+            messagebox.showinfo(
+                "Importação",
+                "Banco de dados carregado com sucesso.",
+            )
+    except Exception as e:
+        messagebox.showerror("Importação", f"Falha na importação:\n{e}")
