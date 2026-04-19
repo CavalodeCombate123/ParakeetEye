@@ -104,6 +104,8 @@ def abrir_webcam():
         if not camera.isOpened():
             messagebox.showerror("Erro", "Não foi possível acessar a webcam.")
             return
+        # Reduz backlog de frames para minimizar "travadinhas" por frame antigo.
+        camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
         encodings_conhecidos, nomes_conhecidos = carregar_banco()
         tracks = {}
@@ -144,6 +146,7 @@ def abrir_webcam():
                         "nome": "Desconhecido",
                         "embedding": None,
                         "spoof_ok": True,
+                        "spoof_fails": 0,
                         "last_embed": 0,
                         "last_spoof": 0
                     })
@@ -151,16 +154,72 @@ def abrir_webcam():
                 tracks = new_tracks
 
             # === Atualização de reconhecimento e anti-spoofing ===
-            for track_id, data in list(tracks.items()):
-                loc = data["loc"]
+            tracks_items = list(tracks.items())
 
-                # Anti-spoofing antes do reconhecimento: se falhar, não compara ao banco (evita nome + alerta laranja)
-                if frame_count - data["last_spoof"] >= WEBCAM_ANTISPOOF_EVERY:
-                    ok_prof, _ = verificar_profundidade_face(
-                        rgb_small, loc, gray_anterior=gray_anterior,
-                        exigir_movimento=True, imagem_bgr=frame_small
-                    )
-                    data["spoof_ok"] = ok_prof
+            # Anti-spoofing pesado opcional: roda no quadro inteiro e em baixa frequência.
+            spoof_faces_cache = []
+            if WEBCAM_USAR_ANTISPOOF_PESADO and frame_count % WEBCAM_ANTISPOOF_EVERY == 0:
+                spoof_faces_cache = detectar_faces(
+                    frame_small,
+                    anti_spoofing=True,
+                    detector_backend=DEEPFACE_DETECTOR_PESADO,
+                )
+
+            # Limita embeddings por frame para evitar picos de processamento.
+            candidatos_embed = []
+            for track_id, data in tracks_items:
+                if (
+                    encodings_conhecidos
+                    and data.get("spoof_ok", True)
+                    and (frame_count - data["last_embed"] >= WEBCAM_EMBED_EVERY)
+                ):
+                    candidatos_embed.append((data["last_embed"], track_id))
+
+            candidatos_embed = sorted(candidatos_embed, key=lambda x: x[0])
+            permitidos_embed = {tid for _, tid in candidatos_embed[:WEBCAM_MAX_EMBEDS_PER_FRAME]}
+
+            for track_id, data in tracks_items:
+                loc = data["loc"]
+                if "spoof_fails" not in data:
+                    data["spoof_fails"] = 0
+
+                # Anti-spoofing/liveness antes do reconhecimento.
+                spoof_interval = WEBCAM_ANTISPOOF_EVERY if WEBCAM_USAR_ANTISPOOF_PESADO else WEBCAM_LIVENESS_EVERY
+                if frame_count - data["last_spoof"] >= spoof_interval:
+                    if WEBCAM_USAR_ANTISPOOF_PESADO and spoof_faces_cache:
+                        top, right, bottom, left = loc
+                        melhor = None
+                        menor_delta = 10**9
+                        for face in spoof_faces_cache:
+                            t, r, b, l = face["loc"]
+                            delta = abs(t - top) + abs(r - right) + abs(b - bottom) + abs(l - left)
+                            if delta < menor_delta:
+                                menor_delta = delta
+                                melhor = face
+                        ok_prof, _ = verificar_profundidade_face(
+                            rgb_small,
+                            loc,
+                            gray_anterior=gray_anterior,
+                            exigir_movimento=True,
+                            imagem_bgr=frame_small,
+                            anti_spoofing_info=melhor,
+                        )
+                    else:
+                        # Modo tempo real: usa vivacidade por movimento sem chamar anti-spoofing pesado.
+                        ok_prof, _ = verificar_profundidade_face(
+                            rgb_small,
+                            loc,
+                            gray_anterior=gray_anterior,
+                            exigir_movimento=True,
+                            imagem_bgr=frame_small,
+                            anti_spoofing_info={"is_real": True, "antispoof_score": 1.0},
+                        )
+                    if ok_prof:
+                        data["spoof_fails"] = 0
+                        data["spoof_ok"] = True
+                    else:
+                        data["spoof_fails"] += 1
+                        data["spoof_ok"] = data["spoof_fails"] < WEBCAM_SPOOF_FAIL_TOLERANCE
                     data["last_spoof"] = frame_count
 
                 # Embedding (reconhecimento) só se passou em vivacidade/anti-spoof recente
@@ -168,6 +227,7 @@ def abrir_webcam():
                     encodings_conhecidos
                     and data.get("spoof_ok", True)
                     and (frame_count - data["last_embed"] >= WEBCAM_EMBED_EVERY)
+                    and track_id in permitidos_embed
                 ):
                     emb = gerar_embedding(frame_small, loc)
                     if emb is not None:
