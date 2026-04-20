@@ -84,10 +84,16 @@ def movimento_medio_roi(gray_atual, gray_anterior, top, right, bottom, left):
     right = min(wa, int(right))
     if bottom <= top or right <= left:
         return None
+    if (bottom - top) * (right - left) < ROI_MOVIMENTO_AREA_MIN:
+        # ROI muito pequena oscila por ruído/compressão e gera falso positivo.
+        return None
     a = gray_atual[top:bottom, left:right].astype(np.float32)
     b = gray_anterior[top:bottom, left:right].astype(np.float32)
     if a.shape != b.shape or a.size == 0:
         return None
+    # Suavização leve reduz ruído de sensor sem custo relevante.
+    a = cv2.GaussianBlur(a, (3, 3), 0)
+    b = cv2.GaussianBlur(b, (3, 3), 0)
     return float(np.mean(np.abs(a - b)))
 
 #------------------------------------------
